@@ -1,8 +1,8 @@
 # ALISTA: Analytic Weights Are As Good As Learned Weights in LISTA
 This repository is for Analytic-LISTA networks proposed in the following paper:
 
-[Xiaohan Chen\*](http://people.tamu.edu/~chernxh),
 [Jialin Liu\*](http://www.math.ucla.edu/~liujl11/pub.html),
+[Xiaohan Chen\*](http://people.tamu.edu/~chernxh),
 [Zhangyang Wang](http://www.atlaswang.com/) and
 [Wotao Yin](http://www.math.ucla.edu/~wotaoyin/)
 "ALISTA: Analytic Weights Are As Good As Learned Weights in LISTA", accepted at
