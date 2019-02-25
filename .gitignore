@@ -10,6 +10,9 @@
 *.output
 *.zip
 out.*
+README
+conv_dicts/
+algorithms/
 */__pycache__/
 .idea/
 logs/
@@ -17,4 +20,5 @@ data/
 experiments/
 mat_weights/
 results/
+deprecated/
 

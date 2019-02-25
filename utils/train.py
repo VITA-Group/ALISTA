@@ -109,8 +109,8 @@ def setup_input_sc(test, p, tbs, vbs, fixval, supp_prob, SNR,
 
 
 def setup_input_cs (train_path, val_path, tbs, vbs) :
-    y_    , f_     = bsd500_cs_inputs (train_path, tbs, None)
-    y_val_, f_val_ = bsd500_cs_inputs (val_path  , vbs, None)
+    y_    , f_     = bsd500_cs_inputs(train_path, tbs, None)
+    y_val_, f_val_ = bsd500_cs_inputs(val_path  , vbs, None)
 
     return y_, f_, y_val_, f_val_
 
@@ -118,39 +118,43 @@ def setup_input_cs (train_path, val_path, tbs, vbs) :
 """*****************************************************************************
 Input for curriculum learning of robust training of normal LISTA type networks.
 *****************************************************************************"""
-def setup_input_robust(A, pmax_sigma, nsigma, pnz, bs_A, bs_x):
+def setup_input_robust(A, pmax_sigma, msigma, pnz, bs_A, bs_x):
+    # NOTE: Here we denote the perturbation level as `pmax_sigma` because we
+    #       think of it as a upper bound and sample the real perturbation level
+    #       from a uniform distribution between [0, `pmax_sigma`].
+
     # get the constant defined by A
-    A_const_ = tf.constant (value=np.expand_dims (A, -1), dtype=tf.float32)
-    m, n, _ = A_const_.shape.as_list ()
+    A_const_ = tf.constant(value=np.expand_dims(A, 0), dtype=tf.float32)
+    _, m, n = A_const_.shape.as_list ()
 
     # generate perturbation of A
-    perturb_ = tf.random_normal  (shape=(m, n, bs_A))
-    psigma_  = tf.random_uniform (shape=(1, 1, bs_A), maxval=pmax_sigma)
+    perturb_ = tf.random_normal(shape=(bs_A, m, n))
+    psigma_ = tf.random_uniform(shape=(bs_A, 1, 1), maxval=pmax_sigma)
     perturb_ = psigma_ * perturb_
     # add perturbation to A and normalize
-    # A_perturbed_ has shape (m, n, bs_A)
+    # A_perturbed_ has shape (bs_A, m, n)
     A_perturbed_ = A_const_ + perturb_
-    colnorms_ = tf.sqrt (tf.reduce_sum (tf.square (A_perturbed_), axis=0, keepdims=True))
+    colnorms_ = tf.sqrt(tf.reduce_sum(tf.square(A_perturbed_), axis=1, keepdims=True))
     A_perturbed_ = A_perturbed_ / colnorms_
 
     # generate sparse codes
     # x_ has the shape (n, bs_x)
-    bernoulli_ = tf.random_uniform (shape=(n, bs_x), minval=0, maxval=1,
-                                    dtype=tf.float32)
-    support_   = tf.to_float (bernoulli_ <= pnz)
-    magnitude_ = tf.random_normal (shape=(n, bs_x), mean=0, stddev=1.0,
+    bernoulli_ = tf.random_uniform(shape=(n, bs_x), minval=0, maxval=1,
                                    dtype=tf.float32)
-    x_ = tf.multiply (support_, magnitude_)
+    support_ = tf.to_float(bernoulli_ <= pnz)
+    magnitude_ = tf.random_normal(shape=(n, bs_x), mean=0, stddev=1.0,
+                                  dtype=tf.float32)
+    x_ = tf.multiply(support_, magnitude_)
 
     # measure
-    # y_ will first have shape (m, bs_x, bs_A)
-    # then we reshape y_ into (m, bs_x * bs_A)
-    y_ = tf.einsum ('mna,nx->mxa', A_perturbed_, x_)
-    noise_ = tf.random_normal (shape=tf.shape (y_), stddev=nsigma)
-    y_ = tf.reshape (y_ + noise_, (m, -1))
+    # y_ will have shape (bs_A, m, bs_x)
+    y_ = tf.einsum('amn,nx->amx', A_perturbed_, x_)
+    noise_ = tf.random_normal(shape=tf.shape (y_), stddev=msigma)
+    # y_ = tf.reshape(y_ + noise_, (m, -1))
+    y_ = y_ + noise_
 
-    # tile x_ from shape (n, bs_x) to shape (n, bs_x * bs_A)
-    x_ = tf.reshape (tf.tile (tf.expand_dims (x_, -1) , [1, 1, bs_A]), (n, -1))
+    # tile x_ from shape (n, bs_x) to shape (bs_A, n, bs_x)
+    x_ = tf.tile(tf.expand_dims(x_, 0) , [bs_A, 1, 1])
 
     return A_perturbed_, y_, x_
 
@@ -321,6 +325,93 @@ def setup_cs_training (model, y_, f_, y_val_, f_val_, x0_,
     return training_stages
 
 
+def setup_denoise_training (model, input_, label_, input_val_, label_val_,
+                            init_feature_, init_lr, decay_rate, lr_decay):
+        """TODO: Docstring for setup_training.
+
+        :input_: Tensorflow placeholder or tensor. Input of training set.
+        :label_: Tensorflow placeholder or tensor. Label for the sparse feature
+            maps of training set.
+        :input_val_: Tensorflow placeholder or tensor. Input of validation set.
+        :label_val_: Tensorflow placeholder or tensor. Label for the sparse
+            feature maps of validation set.
+        :init_feature_: TensorFlow tensor. Initial estimation of feature maps.
+        :init_lr: TODO
+        :decay_rate: TODO
+        :lr_decay: TODO
+        :returns:
+            :training_stages: list of training stages
+
+        """
+        # infer feature_, feature_val_ from input_, input_val_
+        # predictions are the reconstructions
+        _, predicts_ = model.inference(input_, init_feature_)
+        _, predicts_val_ = model.inference(input_val_, init_feature_)
+        assert len (predicts_)     == model._T + 1
+        assert len (predicts_val_) == model._T + 1
+        nmse_denom_     = tf.nn.l2_loss (label_)
+        nmse_denom_val_ = tf.nn.l2_loss (label_val_)
+
+        # start setting up training
+        training_stages = []
+
+        lrs = [init_lr * decay for decay in lr_decay]
+
+        # setup model.lr_multiplier dictionary
+        # learning rate multipliers of each variables
+        lr_multiplier = dict()
+        for var in tf.trainable_variables():
+            lr_multiplier[var.op.name] = 1.0
+
+        # initialize self.train_vars list
+        # variables which will be updated in next training stage
+        train_vars = []
+
+        for t in range (model._T):
+            # layer information for training monitoring
+            layer_info = "{scope} T={time}".format (scope=model._scope, time=t+1)
+
+            # set up loss_ and nmse_
+            loss_ = tf.nn.l2_loss (predicts_ [t+1] - label_)
+            nmse_ = loss_ / nmse_denom_
+            loss_val_ = tf.nn.l2_loss (predicts_val_ [t+1] - label_val_)
+            nmse_val_ = loss_val_ / nmse_denom_val_
+
+            W_ = model._Ws_ [t]
+            theta_ = model._thetas_ [t]
+
+            # train parameters in current layer with initial learning rate
+            if W_ not in train_vars:
+                var_list = (W_, theta_, )
+            else:
+                var_list = (theta_, )
+            op_ = tf.train.AdamOptimizer (init_lr).minimize (loss_,
+                                                             var_list=var_list)
+            training_stages.append ((layer_info, loss_, nmse_,
+                                     loss_val_, nmse_val_, op_, var_list))
+
+            for var in var_list:
+                train_vars.append (var)
+
+            # train all variables in current and former layers with decayed
+            # learning rate
+            for lr in lrs:
+                op_ = get_train_op (loss_, train_vars, lr, lr_multiplier)
+                training_stages.append ((layer_info + ' lr={}'.format (lr),
+                                         loss_,
+                                         nmse_,
+                                         loss_val_,
+                                         nmse_val_,
+                                         op_,
+                                         tuple (train_vars), ))
+
+            # decay learning rates for trained variables
+            for var in train_vars:
+                lr_multiplier [var.op.name] *= decay_rate
+
+        return training_stages
+
+
 def get_train_op (loss_, var_list, lr, lr_multiplier):
     """
     Get training operater of loss_ with respect to the variables in the
@@ -361,20 +452,22 @@ def do_training (sess, stages, savefn, scope, val_step, maxit, better_wait):
     :done: name of stages that has been done.
 
     """
-    if os.path.exists ( savefn ):
-        sys.stdout.write ('Pretrained model found. Loading...\n')
-        state = load_trainable_variables (sess , savefn)
+    if not savefn.endswith(".npz"):
+        savefn += ".npz"
+    if os.path.exists(savefn):
+        sys.stdout.write('Pretrained model found. Loading...\n')
+        state = load_trainable_variables(sess , savefn)
     else:
         state = {}
 
-    done = state.get ('done' , [])
-    log  = state.get ('log' , [])
+    done = state.get('done', [])
+    log  = state.get('log', [])
 
     # for name, loss_, nmse_, loss_val_, nmse_val_, op_, var_list in stages:
     for name, loss_, nmse_, loss_val_, nmse_val_, op_, var_list in stages:
         """Skip stage done already."""
         if name in done:
-            sys.stdout.write ( 'Already did {}. Skipping\n'.format(name))
+            sys.stdout.write('Already did {}. Skipping\n'.format(name))
             continue
 
         # print stage information
@@ -404,22 +497,24 @@ def do_training (sess, stages, savefn, scope, val_step, maxit, better_wait):
                                     loss_val=loss_val, db_val=db_val,
                                     db_best_val=db_best_val))
                 sys.stdout.flush()
-                if i % (100 * val_step) == 0:
-                    print('')
+                if i % (10 * val_step) == 0:
                     age_of_best = (len(nmse_hist_val) -
                                    nmse_hist_val.argmin() - 1)
                     # If nmse has not improved for a long time, jump to the
                     # next training stage.
                     if age_of_best * val_step > better_wait:
+                        print('')
                         break
+                if i % (100 * val_step) == 0:
+                    print('')
 
         done = np.append (done , name)
         # TODO: add log
 
-        state [ 'done' ] = done
-        state [ 'log' ] = log
+        state['done'] = done
+        state['log'] = log
 
-        save_trainable_variables (sess ,savefn , scope, **state)
+        save_trainable_variables(sess ,savefn, scope, **state)
 
 
 def do_cs_training (sess, stages, prob,
@@ -890,8 +985,8 @@ def save_trainable_variables (sess, filename, scope, **kwargs):
             save [str (v.name)] = sess.run (v)
 
     # file name suffix check
-    if filename [-4:] != '.npz':
-        filename = filename + '.npz'
+    if not filename.endswith(".npz"):
+        filename = filename + ".npz"
 
     save.update (kwargs)
     np.savez (filename , **save)

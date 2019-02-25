@@ -5,16 +5,19 @@
 file  : prob.py
 author: Xiaohan Chen
 email : chernxh@tamu.edu
-last_modified: 2018-10-03
+date  : 2019-02-23
 
 Define problem class that is used experiments.
 """
 
 import os
+import argparse
 import numpy as np
 import numpy.linalg as la
-# import tensorflow as tf
 from scipy.io import savemat, loadmat
+
+def str2bool(v):
+    return v.lower() in ('true', '1')
 
 class Problem(object):
 
@@ -25,11 +28,9 @@ class Problem(object):
 
     In every problem, we define:
         :A         : numpy array, measurement matrix
-        # :A_        : tensorflow instance of numpy array A
         :M, N      : integers, # of rows and cols of matrix A
         :yval, xval: numpy arrays, a set of validation data
         :L         : integer, size of validation data
-        # :y_, x_    : tensorflow placeholders for model training
         :pnz       : hyperparameter about how many non-zero entris in sparse code x
         :SNR       : noise level in measurements
     """
@@ -37,7 +38,8 @@ class Problem(object):
     def __init__(self):
         pass
 
-    def build_prob(self, A, L=1000, pnz=0.1, SNR=40.0, con_num=0.0):
+    def build_prob(self, A, L=1000, pnz=0.1, SNR=40.0, con_num=0.0,
+                   col_normalized=True):
         self.A         = A
         # self.A_        = tf.constant( A, dtype=tf.float32, name='A' )
         self.M, self.N = A.shape
@@ -49,6 +51,13 @@ class Problem(object):
 
         self.yval, self.xval \
                 = self.gen_samples( self.L )
+
+        if con_num > 0:
+            U, _, V = la.svd (A, full_matrices=False)
+            s = np.logspace (0, np.log10 (1 / con_num), self.M)
+            A = np.dot (U * (s * np.sqrt(self.N) / la.norm(s)), V).astype (np.float32)
+        if col_normalized:
+            A = A / np.sqrt(np.sum(np.square(A), axis=0, keepdims=True))
         # self.x_ = tf.placeholder( tf.float32, (self.N, None), name='x' )
         # self.y_ = tf.placeholder( tf.float32, (self.M, None), name='y' )
 
@@ -120,6 +129,8 @@ class Problem(object):
         else:
             raise ValueError( 'invalid file type {}'.format( ftype ) )
 
+        print("problem saved to {}".format(path))
+
 
     def read(self, fname):
         """
@@ -175,22 +186,79 @@ def random_A(M, N, con_num=0, col_normalized=True):
 
     """
     A = np.random.normal( scale=1.0/np.sqrt(M), size=(M,N) ).astype(np.float32)
-    if con_num > 0:
-        U, _, V = la.svd (A, full_matrices=False)
-        s = np.logspace (0, np.log10 (1 / con_num), M)
-        A = np.dot (U * (s * np.sqrt(N) / la.norm(s)), V).astype (np.float32)
-    if col_normalized:
-        A = A / np.sqrt (np.sum (np.square (A), axis=0, keepdims=True))
     return A
 
-def setup_problem (M, N, L, pnz, SNR, con_num, col_normalized):
-    A = random_A  (M, N, con_num, col_normalized)
-    prob = Problem ()
-    prob.build_prob (A, L, pnz, SNR, con_num)
+def setup_problem (A, L, pnz, SNR, con_num, col_normalized):
+    prob = Problem()
+    prob.build_prob(A, L, pnz, SNR, con_num, col_normalized)
     return prob
 
 def load_problem( fname ):
     prob = Problem()
     prob.read (fname)
     return prob
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    '-M', '--M', type=int, default=250,
+    help="Dimension of measurements.")
+parser.add_argument(
+    '-N', '--N', type=int, default=500,
+    help="Dimension of sparse codes.")
+parser.add_argument(
+    '-L', '--L', type=int, default=0,
+    help="Number of samples for validation (deprecated. please use default).")
+parser.add_argument(
+    '-P', '--pnz', type=float, default=0.1,
+    help="Percent of nonzero entries in sparse codes.")
+parser.add_argument(
+    '-S', '--SNR', type=str, default='inf',
+    help="Strength of noises in measurements.")
+parser.add_argument(
+    '-C', '--con_num', type=float, default=0.0,
+    help="Condition number of measurement matrix. 0 for no modification on condition number.")
+parser.add_argument(
+    '-CN', '--col_normalized', type=str2bool, default=True,
+    help="Flag of whether normalize the columns of the dictionary or sensing matrix.")
+parser.add_argument(
+    "-lA", "--load_A", type=str, default=None,
+    help="Path to the measurement matrix to be loaded.")
+parser.add_argument(
+    '-ef', '--exp_folder', type=str, default='./experiments',
+    help="Root folder for problems and momdels.")
+parser.add_argument(
+    "-pfn", "--prob_file", type=str, default="prob.npz",
+    help="The (base) file name of problem file.")
+
+if __name__ == "__main__":
+    config, unparsed = parser.parse_known_args()
+    if not config.load_A is None:
+        try:
+            A = np.load(config.load_A)
+            print("matrix loaded from {}. will be used to generate the problem"
+                  .format(config.load_A))
+        except Exception as e:
+            raise ValueError("invalid file {}".format(config.load_A))
+        config.M, config.N = A.shape
+    else:
+        A = np.random.normal(scale=1.0/np.sqrt(config.M),
+                             size=(config.M, config.N)).astype(np.float32)
+    prob_desc = ('m{}_n{}_k{}_p{}_s{}'.format(
+        config.M, config.N, config.con_num, config.pnz, config.SNR))
+    prob_folder = os.path.join(config.exp_folder, prob_desc)
+    if not os.path.exists(prob_folder):
+        os.makedirs(prob_folder)
+    out_file = os.path.join(config.exp_folder, prob_desc, config.prob_file)
+    if os.path.exists(out_file):
+        raise ValueError("specified problem file {} already exists".format(out_file))
+    if config.SNR == "inf":
+        SNR = np.inf
+    else:
+        try:
+            SNR = float(config.SNR)
+        except Exception as e:
+            raise ValueError("invalid SNR. use 'inf' or a float number.")
+    p = setup_problem(A, config.L, config.pnz, SNR, config.con_num,
+                      config.col_normalized)
+    p.save(out_file, ftype="npz")
 
