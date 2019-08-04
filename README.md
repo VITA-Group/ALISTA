@@ -6,7 +6,7 @@ This repository is for Analytic-LISTA networks proposed in the following paper:
 [Zhangyang Wang](http://www.atlaswang.com/) and
 [Wotao Yin](http://www.math.ucla.edu/~wotaoyin/)
 "ALISTA: Analytic Weights Are As Good As Learned Weights in LISTA", accepted at
-ICLR 2019. The pdf can be found [here](https://openreview.net/pdf?id=B1lnzn0ctQ).
+ICLR 2019. The pdf can be found [here](https://openreview.net/pdf?id=B1lnzn0ctQ)..
 
 \*: These authors contributed equally and are listed alphabetically.
 
